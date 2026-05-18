@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+seen_ads.json
+.env
+config.txt
