@@ -1,5 +1,7 @@
 """
-SS.lv -> Telegram pazinojumu bots (v2 ar diagnostiku)
+SS.lv -> Telegram pazinojumu bots (v2)
+Seko 3-4 istabu dzivokliem rajonos: Agenskalns, Imanta, Zolitude, Ilguciems
+Parbauda ik pec 1 stundas un suta tikai JAUNUS sludinajumus.
 """
 
 import os
@@ -7,7 +9,6 @@ import json
 import time
 import logging
 import requests
-import sys
 from bs4 import BeautifulSoup
 from pathlib import Path
 
@@ -15,14 +16,18 @@ from pathlib import Path
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "IELIEC_SAVU_TOKENU_SEIT")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "IELIEC_SAVU_CHAT_ID_SEIT")
 
+# Viens URL katram rajonam - filtru pa istabam veicam koda
 SEARCH_URLS = {
     "Agenskalns": "https://www.ss.com/lv/real-estate/flats/riga/agenskalns/sell/",
     "Imanta":     "https://www.ss.com/lv/real-estate/flats/riga/imanta/sell/",
     "Zolitude":   "https://www.ss.com/lv/real-estate/flats/riga/zolitude/sell/",
     "Ilguciems":  "https://www.ss.com/lv/real-estate/flats/riga/ilguciems/sell/",
 }
+
+# Istabu skaits, ko meklejam
 WANTED_ROOMS = {"3", "4"}
-CHECK_INTERVAL_SECONDS = 60 * 60
+
+CHECK_INTERVAL_SECONDS = 60 * 60  # 1 stunda
 SEEN_FILE = Path("seen_ads.json")
 
 logging.basicConfig(
@@ -30,32 +35,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger(__name__)
-
-
-def diagnose_env():
-    """Diagnostika - izvada visus pieejamos vides mainigos."""
-    log.info("=" * 50)
-    log.info("DIAGNOSTIKA: vides mainigie")
-    log.info("=" * 50)
-
-    # Visi vides mainigie, kas satur TELEGRAM
-    telegram_vars = {k: v for k, v in os.environ.items() if "TELEGRAM" in k.upper()}
-    if telegram_vars:
-        log.info("Atrasti mainigie ar 'TELEGRAM' nosaukuma:")
-        for k, v in telegram_vars.items():
-            # Apslēpjam vērtību daļēji
-            masked = v[:8] + "..." + v[-4:] if len(v) > 12 else "***"
-            log.info(f"  {k} = {masked} (garums: {len(v)})")
-    else:
-        log.error("NAV neviena mainiga ar 'TELEGRAM' nosaukuma!")
-
-    log.info(f"TELEGRAM_TOKEN sakums: '{TELEGRAM_TOKEN[:15]}...' (garums: {len(TELEGRAM_TOKEN)})")
-    log.info(f"TELEGRAM_CHAT_ID: '{TELEGRAM_CHAT_ID}' (garums: {len(TELEGRAM_CHAT_ID)})")
-
-    # Visi vides mainigie (tikai nosaukumi)
-    log.info(f"Kopā vides mainigi: {len(os.environ)}")
-    log.info(f"Pirmie 20 mainigi: {sorted(os.environ.keys())[:20]}")
-    log.info("=" * 50)
 
 
 def load_seen() -> set:
@@ -73,11 +52,18 @@ def save_seen(seen: set) -> None:
         json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
 
 
-def fetch_page(url: str):
+def fetch_page(url: str) -> str | None:
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "lv,en-US;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
     }
     try:
         r = requests.get(url, headers=headers, timeout=20)
@@ -88,35 +74,68 @@ def fetch_page(url: str):
         return None
 
 
-def parse_ads(html: str) -> list:
+def parse_ads(html: str) -> list[dict]:
+    """
+    Parse sludinajumu sarakstu no ss.lv HTML lapas.
+
+    Tabulas kolonas pec saites:
+    [Iela] [Istabas] [m^2] [Stavs] [Serija] [Cena/m2] [Cena]
+    """
     soup = BeautifulSoup(html, "html.parser")
     ads = []
+
     for tr in soup.find_all("tr", id=lambda x: x and x.startswith("tr_")):
-        if "bnr" in tr.get("id", "").lower():
+        tr_id = tr.get("id", "")
+        if "bnr" in tr_id.lower():
             continue
+
         link_tag = tr.find("a", id=lambda x: x and x.startswith("dm_"))
         if not link_tag:
             continue
+
         ad_id = link_tag.get("id", "").replace("dm_", "")
         href = link_tag.get("href", "")
         ad_url = "https://www.ss.com" + href if href.startswith("/") else href
         title = link_tag.get_text(strip=True)
+
         cells = tr.find_all("td", class_=lambda c: c and "msga2-o" in c)
         details = [c.get_text(strip=True) for c in cells]
+
         if len(details) < 7:
             continue
+
+        street  = details[0]
+        rooms   = details[1]
+        area    = details[2]
+        floor   = details[3]
+        series  = details[4]
+        ppm2    = details[5]
+        price   = details[6]
+
         ads.append({
-            "id": ad_id, "url": ad_url, "title": title,
-            "street": details[0], "rooms": details[1], "area": details[2],
-            "floor": details[3], "series": details[4],
-            "price_m2": details[5], "price": details[6],
+            "id": ad_id,
+            "url": ad_url,
+            "title": title,
+            "street": street,
+            "rooms": rooms,
+            "area": area,
+            "floor": floor,
+            "series": series,
+            "price_m2": ppm2,
+            "price": price,
         })
+
     return ads
 
 
 def send_telegram(ad: dict, region: str) -> bool:
+    """Suta vienkarsu HTML formatētu Telegram ziņu."""
     def esc(s: str) -> str:
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        # HTML escape - vienkarsaks neka MarkdownV2
+        return (s.replace("&", "&amp;")
+                 .replace("<", "&lt;")
+                 .replace(">", "&gt;"))
+
     text = (
         f"🏠 <b>Jauns sludinajums — {esc(region)}</b>\n\n"
         f"📍 {esc(ad['street'])}\n"
@@ -126,25 +145,33 @@ def send_telegram(ad: dict, region: str) -> bool:
         f"📝 {esc(ad['title'][:200])}\n\n"
         f'<a href="{ad["url"]}">Skatit sludinajumu</a>'
     )
+
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+    }
     try:
         r = requests.post(api_url, json=payload, timeout=15)
         if r.status_code == 200:
             return True
         log.error(f"Telegram kluda: {r.status_code} {r.text}")
     except Exception as e:
-        log.error(f"Telegram sutisanas kluda: {e}")
+        log.error(f"Telegram suttiisanas kluda: {e}")
     return False
 
 
-def collect_ads(region: str, url: str) -> list:
+def collect_ads(region: str, url: str) -> list[dict]:
     log.info(f"Parbaudu: {region}")
     html = fetch_page(url)
     if not html:
         return []
+
     all_ads = parse_ads(html)
-    log.info(f"  Atrasti {len(all_ads)} sludinajumi")
+    log.info(f"  Atrasti {len(all_ads)} sludinajumi (visi istabu skaiti)")
+
     filtered = [a for a in all_ads if a["rooms"] in WANTED_ROOMS]
     log.info(f"  No tiem {len(filtered)} ar 3-4 istabam")
     return filtered
@@ -162,6 +189,7 @@ def run_once(seen: set) -> set:
                 new_count += 1
                 time.sleep(1)
         time.sleep(3)
+
     if new_count > 0:
         log.info(f"Nosutiti {new_count} jauni sludinajumi")
         save_seen(seen)
@@ -171,12 +199,9 @@ def run_once(seen: set) -> set:
 
 
 def main():
-    log.info("=== SS.lv Telegram bots (v2-diag) startejas ===")
-    diagnose_env()
-
+    log.info("=== SS.lv Telegram bots (v2) startejas ===")
     if TELEGRAM_TOKEN.startswith("IELIEC") or TELEGRAM_CHAT_ID.startswith("IELIEC"):
         log.error("Ludzu, iestatiet TELEGRAM_TOKEN un TELEGRAM_CHAT_ID!")
-        log.error("Skripts beidz darbu.")
         return
 
     seen = load_seen()
@@ -190,7 +215,7 @@ def main():
                 seen.add(ad["id"])
             time.sleep(2)
         save_seen(seen)
-        log.info(f"Sakuma stavoklis: {len(seen)} sludinajumi atzimeti")
+        log.info(f"Sakuma stavoklis: {len(seen)} sludinajumi atzimeti ka redzeti")
 
     while True:
         try:
