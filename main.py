@@ -1,33 +1,29 @@
 """
-SS.lv -> Telegram pazinojumu bots (v2)
-Seko 3-4 istabu dzivokliem rajonos: Agenskalns, Imanta, Zolitude, Ilguciems
-Parbauda ik pec 1 stundas un suta tikai JAUNUS sludinajumus.
+SS.lv -> Telegram pazinojumu bots (v4 - GitHub Actions versija)
+Vienreizeja izpilde - bez "while True" cikla.
+GitHub Actions palaiz so skriptu reizi stunda automatiski.
 """
 
 import os
 import json
-import time
+import sys
 import logging
-import requests
-from bs4 import BeautifulSoup
 from pathlib import Path
 
-# === KONFIGURACIJA ===
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "IELIEC_SAVU_TOKENU_SEIT")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "IELIEC_SAVU_CHAT_ID_SEIT")
+import requests
+from bs4 import BeautifulSoup
 
-# Viens URL katram rajonam - filtru pa istabam veicam koda
+# === KONFIGURACIJA NO VIDES MAINIGAJIEM ===
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
 SEARCH_URLS = {
     "Agenskalns": "https://www.ss.com/lv/real-estate/flats/riga/agenskalns/sell/",
     "Imanta":     "https://www.ss.com/lv/real-estate/flats/riga/imanta/sell/",
     "Zolitude":   "https://www.ss.com/lv/real-estate/flats/riga/zolitude/sell/",
     "Ilguciems":  "https://www.ss.com/lv/real-estate/flats/riga/ilguciems/sell/",
 }
-
-# Istabu skaits, ko meklejam
 WANTED_ROOMS = {"3", "4"}
-
-CHECK_INTERVAL_SECONDS = 60 * 60  # 1 stunda
 SEEN_FILE = Path("seen_ads.json")
 
 logging.basicConfig(
@@ -75,24 +71,15 @@ def fetch_page(url: str) -> str | None:
 
 
 def parse_ads(html: str) -> list[dict]:
-    """
-    Parse sludinajumu sarakstu no ss.lv HTML lapas.
-
-    Tabulas kolonas pec saites:
-    [Iela] [Istabas] [m^2] [Stavs] [Serija] [Cena/m2] [Cena]
-    """
     soup = BeautifulSoup(html, "html.parser")
     ads = []
-
     for tr in soup.find_all("tr", id=lambda x: x and x.startswith("tr_")):
         tr_id = tr.get("id", "")
         if "bnr" in tr_id.lower():
             continue
-
         link_tag = tr.find("a", id=lambda x: x and x.startswith("dm_"))
         if not link_tag:
             continue
-
         ad_id = link_tag.get("id", "").replace("dm_", "")
         href = link_tag.get("href", "")
         ad_url = "https://www.ss.com" + href if href.startswith("/") else href
@@ -100,41 +87,26 @@ def parse_ads(html: str) -> list[dict]:
 
         cells = tr.find_all("td", class_=lambda c: c and "msga2-o" in c)
         details = [c.get_text(strip=True) for c in cells]
-
         if len(details) < 7:
             continue
-
-        street  = details[0]
-        rooms   = details[1]
-        area    = details[2]
-        floor   = details[3]
-        series  = details[4]
-        ppm2    = details[5]
-        price   = details[6]
-
         ads.append({
             "id": ad_id,
             "url": ad_url,
             "title": title,
-            "street": street,
-            "rooms": rooms,
-            "area": area,
-            "floor": floor,
-            "series": series,
-            "price_m2": ppm2,
-            "price": price,
+            "street": details[0],
+            "rooms": details[1],
+            "area": details[2],
+            "floor": details[3],
+            "series": details[4],
+            "price_m2": details[5],
+            "price": details[6],
         })
-
     return ads
 
 
 def send_telegram(ad: dict, region: str) -> bool:
-    """Suta vienkarsu HTML formatētu Telegram ziņu."""
     def esc(s: str) -> str:
-        # HTML escape - vienkarsaks neka MarkdownV2
-        return (s.replace("&", "&amp;")
-                 .replace("<", "&lt;")
-                 .replace(">", "&gt;"))
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     text = (
         f"🏠 <b>Jauns sludinajums — {esc(region)}</b>\n\n"
@@ -168,62 +140,53 @@ def collect_ads(region: str, url: str) -> list[dict]:
     html = fetch_page(url)
     if not html:
         return []
-
     all_ads = parse_ads(html)
-    log.info(f"  Atrasti {len(all_ads)} sludinajumi (visi istabu skaiti)")
-
+    log.info(f"  Atrasti {len(all_ads)} sludinajumi (visi)")
     filtered = [a for a in all_ads if a["rooms"] in WANTED_ROOMS]
     log.info(f"  No tiem {len(filtered)} ar 3-4 istabam")
     return filtered
 
 
-def run_once(seen: set) -> set:
+def main():
+    log.info("=== SS.lv Telegram bots (GitHub Actions) ===")
+
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error("Nav iestatits TELEGRAM_TOKEN vai TELEGRAM_CHAT_ID!")
+        sys.exit(1)
+
+    log.info(f"Token garums: {len(TELEGRAM_TOKEN)}, Chat ID: {TELEGRAM_CHAT_ID}")
+
+    seen = load_seen()
+    log.info(f"Ieladeti {len(seen)} jau redzeti sludinajumi")
+
+    # Pirma palaisana - tikai apzimet visus kā redzetus, NEsuta
+    first_run = len(seen) == 0
+    if first_run:
+        log.info("Pirma palaisana - tikai iezimeju esosos sludinajumus...")
+
     new_count = 0
     for region, url in SEARCH_URLS.items():
         ads = collect_ads(region, url)
         for ad in ads:
             if ad["id"] in seen:
                 continue
-            if send_telegram(ad, region):
+            if first_run:
                 seen.add(ad["id"])
-                new_count += 1
-                time.sleep(1)
-        time.sleep(3)
+            else:
+                if send_telegram(ad, region):
+                    seen.add(ad["id"])
+                    new_count += 1
 
-    if new_count > 0:
+    save_seen(seen)
+
+    if first_run:
+        log.info(f"Sakuma stavoklis: {len(seen)} sludinajumi atzimeti ka redzeti")
+    elif new_count > 0:
         log.info(f"Nosutiti {new_count} jauni sludinajumi")
-        save_seen(seen)
     else:
         log.info("Jaunu sludinajumu nav")
-    return seen
 
-
-def main():
-    log.info("=== SS.lv Telegram bots (v2) startejas ===")
-    if TELEGRAM_TOKEN.startswith("IELIEC") or TELEGRAM_CHAT_ID.startswith("IELIEC"):
-        log.error("Ludzu, iestatiet TELEGRAM_TOKEN un TELEGRAM_CHAT_ID!")
-        return
-
-    seen = load_seen()
-    log.info(f"Ieladeti {len(seen)} jau redzeti sludinajumi")
-
-    if not seen:
-        log.info("Pirma palaisana - iezimeju esosos sludinajumus ka redzetus...")
-        for region, url in SEARCH_URLS.items():
-            ads = collect_ads(region, url)
-            for ad in ads:
-                seen.add(ad["id"])
-            time.sleep(2)
-        save_seen(seen)
-        log.info(f"Sakuma stavoklis: {len(seen)} sludinajumi atzimeti ka redzeti")
-
-    while True:
-        try:
-            seen = run_once(seen)
-        except Exception as e:
-            log.exception(f"Negaidita kluda: {e}")
-        log.info(f"Gulu {CHECK_INTERVAL_SECONDS // 60} min...")
-        time.sleep(CHECK_INTERVAL_SECONDS)
+    log.info("=== Pabeidzu ===")
 
 
 if __name__ == "__main__":
