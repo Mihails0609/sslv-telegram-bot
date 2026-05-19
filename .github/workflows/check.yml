@@ -1,0 +1,43 @@
+name: Check SS.lv every hour
+
+on:
+  schedule:
+    # Reizi stunda (UTC laika)
+    - cron: '0 * * * *'
+  workflow_dispatch:  # Lauj palaist manuali no GitHub UI
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Vajadzigs, lai commitatu seen_ads.json atpakal
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run SS.lv checker
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: Commit updated seen_ads.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen_ads.json
+          if git diff --staged --quiet; then
+            echo "Nav izmainu seen_ads.json - neko necommitam"
+          else
+            git commit -m "Atjauninu seen_ads.json [auto]"
+            git push
+          fi
