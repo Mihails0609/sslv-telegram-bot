@@ -3,7 +3,7 @@ name: Check SS.lv every hour
 on:
   schedule:
     # Reizi stunda (UTC laika)
-    - cron: '17 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:  # Lauj palaist manuali no GitHub UI
 
 jobs:
