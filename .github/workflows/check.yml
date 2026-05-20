@@ -2,9 +2,15 @@ name: Check SS.lv every hour
 
 on:
   schedule:
-    # Reizi stunda (UTC laika)
+    # Katras 15 minutes - vairak palaisanas izlidzina GitHub Actions neuzticamibu
     - cron: '*/15 * * * *'
   workflow_dispatch:  # Lauj palaist manuali no GitHub UI
+
+# Pasargajam no vairaku palaisanu paralelas izpildes
+# Ja jauna palaisana sakas, kamer veca vel notiek - jauna gaida, ka veca pabeigs
+concurrency:
+  group: sslv-check
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -39,5 +45,16 @@ jobs:
             echo "Nav izmainu seen_ads.json - neko necommitam"
           else
             git commit -m "Atjauninu seen_ads.json [auto]"
-            git push
+            # Drosibas tikls - ja kads cits commit notika starpa, paljemam ta izmainas un parspeleejam savas
+            # Ja konflikts seen_ads.json - vienkarsi pajemam mizu versiju (vinas IDi pielikti pie musu)
+            for i in 1 2 3; do
+              git pull --rebase --strategy-option=theirs || true
+              if git push; then
+                echo "Push veiksmigs no $i meginajuma"
+                break
+              else
+                echo "Push neizdevas, meginu velreiz ($i)..."
+                sleep 2
+              fi
+            done
           fi
